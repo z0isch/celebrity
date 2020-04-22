@@ -29,6 +29,7 @@ executable frontend
                      , jsaddle
                      , jsaddle-dom
                      , containers
+                     , bytestring
   ghc-options: -threaded
   -- hs-source-dirs:
   default-language:    Haskell2010
