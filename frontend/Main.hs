@@ -26,6 +26,8 @@ import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe
+import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding as E
@@ -66,7 +68,7 @@ main =
       $ \_ -> flip runFirebase firebaseConfig $ do
         fbD <- subscribeDoc @R @FireBaseState R1 (Id "jcmKQtFxX63H8QoPvII8")
         let widgetPicker = \case
-              WritingQuestions s -> writingQuestionsWidget (Player "b") s
+              WritingQuestions s -> writingQuestionsWidget fbD (Player "b") s
               WaitingForRound -> waitingForRorRoundWidget
             onJustChange _ Nothing Nothing = True
             onJustChange f (Just a) (Just b) = f (_fireBaseStateState a) (_fireBaseStateState b)
@@ -96,11 +98,22 @@ writingQuestionsWidget ::
     TriggerEvent t m,
     PerformEvent t m
   ) =>
+  Dynamic t (Maybe FireBaseState) ->
   Player ->
   WritingQuestionState ->
   m ()
-writingQuestionsWidget player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
-  let initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
+writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
+  let totalWordsSubmittedD =
+        ffor fbD $
+          foldMapOf
+            ( _Just
+                . fireBaseStateState
+                . _WritingQuestions
+                . writingQuestionStatePlayersWords
+            )
+            (foldMap (Sum . NE.length))
+      initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
+  el "div" $ display totalWordsSubmittedD
   wordListD <- el "div" $ wordList initWords
   saveClickE :: Event t () <- domEvent Click . fst <$$> el' "button" $ text "Save Word List"
   updatingWordListD <- transactionUpdate R1 $ ffor (tagPromptlyDyn wordListD saveClickE) $ \wl ->
