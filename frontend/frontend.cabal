@@ -18,7 +18,8 @@ extra-source-files:  CHANGELOG.md
 
 executable frontend
   main-is:             Main.hs
-  other-modules:       Reflex.Firebase
+  other-modules:       Celebrity.Types
+                       Reflex.Firebase
   -- other-extensions:
   build-depends:       base
                      , reflex-dom

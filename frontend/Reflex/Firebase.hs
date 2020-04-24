@@ -34,6 +34,7 @@ module Reflex.Firebase
     delete,
     query,
     subscribe,
+    subscribeDoc,
     dynSubscribe,
     transactionUpdate,
   )
@@ -230,7 +231,7 @@ randRevision = eval @String "window.crypto.getRandomValues(new Uint32Array(1))[0
 
 data TransactionUpdate r
   = OnlyCurrent r
-  | HandleStale (r -> r)
+  | HandleStale (r -> Maybe r)
 
 transactionUpdate ::
   forall q r t m.
@@ -260,9 +261,11 @@ transactionUpdate route transWriteE = do
                       void $ transaction ^. js2 @String "set" documentRef (setRevision item newRevision)
                       void $ call returnCb global [newRevision]
                     else void $ call returnCb global [jsNull]
-                HandleStale updater -> do
-                  void $ transaction ^. js2 @String "set" documentRef (setRevision (updater currentItemStored) newRevision)
-                  void $ call returnCb global [newRevision]
+                HandleStale updater -> case updater currentItemStored of
+                  Nothing -> void $ call returnCb global [jsNull]
+                  Just newItem -> do
+                    void $ transaction ^. js2 @String "set" documentRef (setRevision newItem newRevision)
+                    void $ call returnCb global [newRevision]
         let runTransCb = fun $ \_ _ [returnCb, transaction] -> do
               getP <-
                 transaction
@@ -292,6 +295,31 @@ withReturnCallback :: JSCallAsFunction -> JSM JSVal
 withReturnCallback f = call (eval @String "f=>g=>{let a;f(p=>a=p,g);return a;}") global [f]
 
 -- META READ
+subscribeDoc ::
+  forall q r t m.
+  ( MonadFirebase m,
+    MonadFirebase (Performable m),
+    PostBuild t m,
+    TriggerEvent t m,
+    PerformEvent t m,
+    Route q r,
+    MonadHold t m
+  ) =>
+  q r ->
+  Id ->
+  m (Dynamic t (Maybe r))
+subscribeDoc route i = do
+  postBuild <- getPostBuild
+  let act callback = do
+        result <- collection $ Query route []
+        liftJSM $ do
+          jsCallback <- asyncFunction $ \_ _ [val] -> do
+            dataResult <- val ^. js0 ("data" :: String) >>= fromJSValUnchecked
+            liftIO $ callback (Just dataResult)
+          void $ result ^. (js1 @String "doc" i . js1 @String "onSnapshot" jsCallback)
+  resultE <- performEventAsync (act <$ postBuild)
+  holdDyn Nothing resultE
+
 subscribe ::
   ( MonadFirebase m,
     MonadFirebase (Performable m),
