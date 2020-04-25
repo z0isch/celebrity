@@ -10,7 +10,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 
--- {"tag":"WritingQuestions","contents":{"_writingQuestionStatePlayersWords":[[{"unPlayer":"b"},["baby", "baby", "baby"]]]}}
+-- {"tag":"WritingQuestions","contents":{"_writingQuestionStatePlayersWords":[[{"unPlayer":"a"},["yeah","yeah","yeah"]],[{"unPlayer":"b"},["Devin!","do-do connector "]]]}}
 -- {"tag":"WaitingForRound"}
 module Main where
 
@@ -18,21 +18,12 @@ import Celebrity.Types
 import Control.Lens
 import Control.Monad
 import Control.Monad.Fix
-import Control.Monad.IO.Class
-import Data.Aeson
-import Data.Bool (bool)
-import qualified Data.ByteString.Lazy as BL
-import Data.List.NonEmpty (NonEmpty)
+import Data.Function
 import qualified Data.List.NonEmpty as NE
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe
 import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Encoding as E
-import Data.Void
-import GHC.Generics (Generic)
 import Language.Javascript.JSaddle
 import Reflex.Dom
 import Reflex.Firebase
@@ -63,21 +54,54 @@ main :: IO ()
 main =
   mainWidget $ do
     script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
-    void $ widgetHold (el "pre" $ text "Loading")
+    void $ widgetHold loading
       $ ffor (domEvent Load script1)
       $ \_ -> flip runFirebase firebaseConfig $ do
-        fbD <- subscribeDoc @R @FireBaseState R1 (Id "jcmKQtFxX63H8QoPvII8")
-        let widgetPicker = \case
-              WritingQuestions s -> writingQuestionsWidget fbD (Player "b") s
-              WaitingForRound -> waitingForRorRoundWidget
-            onJustChange _ Nothing Nothing = True
-            onJustChange f (Just a) (Just b) = f (_fireBaseStateState a) (_fireBaseStateState b)
-            onJustChange _ _ _ = False
-            keepLocalState (WritingQuestions _) (WritingQuestions _) = True
-            keepLocalState _ _ = False
-        listenableChanges <- holdUniqDynBy (onJustChange keepLocalState) fbD
-        void $ dyn $
-          maybe (el "pre" $ text "Loading") (widgetPicker . _fireBaseStateState) <$> listenableChanges
+        mfbD <- subscribeDoc @R @FireBaseState R1 (Id "jcmKQtFxX63H8QoPvII8") >>= maybeDyn
+        void $ dyn $ ffor mfbD $ \case
+          Nothing -> loading
+          Just fbD -> do
+            listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
+            void $ dyn $ (widgetPicker fbD . _fireBaseStateState) <$> listenableChanges
+
+loading :: (DomBuilder t0 m) => m ()
+loading = el "pre" $ text "Loading"
+
+shouldWidgetKeepLocalState :: GameState -> GameState -> Bool
+shouldWidgetKeepLocalState (WritingQuestions _) (WritingQuestions _) = True
+shouldWidgetKeepLocalState _ _ = False
+
+widgetPicker ::
+  ( DomBuilder t m,
+    PostBuild t m,
+    MonadHold t m,
+    MonadFix m,
+    PerformEvent t m,
+    TriggerEvent t m,
+    MonadFirebase (Performable m),
+    MonadFirebase m
+  ) =>
+  Dynamic t FireBaseState ->
+  GameState ->
+  m ()
+widgetPicker fbD = \case
+  WritingQuestions s -> do
+    saveWordListE <- writingQuestionsWidget fbD (Player "b") s
+    _ <- transactionUpdate R1 $ ffor saveWordListE $ \wl ->
+      ( Id "jcmKQtFxX63H8QoPvII8",
+        HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
+          WritingQuestions _ ->
+            Just $
+              fbs
+                & fireBaseStateState
+                . _WritingQuestions
+                . writingQuestionStatePlayersWords
+                . at (Player "b")
+                .~ NE.nonEmpty (filter (not . T.null) wl)
+          _ -> Nothing
+      )
+    pure ()
+  WaitingForRound -> waitingForRorRoundWidget
 
 waitingForRorRoundWidget ::
   ( DomBuilder t m
@@ -91,23 +115,17 @@ writingQuestionsWidget ::
   ( MonadFix m,
     DomBuilder t m,
     MonadHold t m,
-    PostBuild t m,
-    Reflex t,
-    MonadFirebase m,
-    MonadFirebase (Performable m),
-    TriggerEvent t m,
-    PerformEvent t m
+    PostBuild t m
   ) =>
-  Dynamic t (Maybe FireBaseState) ->
+  Dynamic t FireBaseState ->
   Player ->
   WritingQuestionState ->
-  m ()
-writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
+  m (Event t [Text])
+writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = do
   let totalWordsSubmittedD =
         ffor fbD $
           foldMapOf
-            ( _Just
-                . fireBaseStateState
+            ( fireBaseStateState
                 . _WritingQuestions
                 . writingQuestionStatePlayersWords
             )
@@ -115,29 +133,14 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
       initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
   el "div" $ display totalWordsSubmittedD
   wordListD <- el "div" $ wordList initWords
-  saveClickE :: Event t () <- domEvent Click . fst <$$> el' "button" $ text "Save Word List"
-  updatingWordListD <- transactionUpdate R1 $ ffor (tagPromptlyDyn wordListD saveClickE) $ \wl ->
-    ( Id "jcmKQtFxX63H8QoPvII8",
-      HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
-        WritingQuestions _ ->
-          Just $
-            fbs
-              & fireBaseStateState
-              . _WritingQuestions
-              . writingQuestionStatePlayersWords
-              . at player
-              .~ NE.nonEmpty (filter (not . T.null) wl)
-        _ -> Nothing
-    )
-  pure ()
+  tagPromptlyDyn wordListD . domEvent Click . fst <$$> el' "button" $ text "Save Word List"
 
 wordList ::
   forall m t.
   ( MonadFix m,
     DomBuilder t m,
     MonadHold t m,
-    PostBuild t m,
-    Reflex t
+    PostBuild t m
   ) =>
   [Text] ->
   m (Dynamic t [Text])
@@ -146,7 +149,7 @@ wordList initWords = mdo
       wordListDeletE = switchDyn $ leftmost . Map.elems . fmap snd <$> wordListInputs
       wordListAddE = domEvent Click addWordButton
       onWordListMod (Left _) xs =
-        let x = maybe (-1) fst (Map.lookupMax xs)
+        let x = maybe (-1 :: Int) fst (Map.lookupMax xs)
          in Map.insert (succ x) "" xs
       onWordListMod (Right i) xs = Map.delete i xs
   wordListD <-
@@ -187,7 +190,7 @@ firebaseTest = do
         (,)
           <$> ( transactionUpdate R1
                   $ ffor randE
-                  $ \r ->
+                  $ \_ ->
                     ( Id "jcmKQtFxX63H8QoPvII8",
                       OnlyCurrent $
                         FireBaseState
@@ -197,7 +200,7 @@ firebaseTest = do
               )
           <*> ( transactionUpdate R1
                   $ ffor randE
-                  $ \r ->
+                  $ \_ ->
                     ( Id "jcmKQtFxX63H8QoPvII8",
                       OnlyCurrent $
                         FireBaseState
@@ -207,5 +210,5 @@ firebaseTest = do
               )
       el "pre" $ display transD1
       el "pre" $ display transD2
-      el "ol" $ simpleList fbD $ \d -> el "li" $ display d
+      _ <- el "ol" $ simpleList fbD $ \d -> el "li" $ display d
       pure ()

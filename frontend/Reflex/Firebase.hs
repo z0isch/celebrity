@@ -130,12 +130,12 @@ query ::
   Query q r ->
   Firebase m [(Id, r)]
 query q = do
-  result <- collection q
+  collectionResult <- collection q
   responseRef <- liftIO newEmptyMVar
-  callback <- liftJSM $ function $ \_ _ (val : _) -> do
-    result <- liftJSM $ getSnapshotData val
+  callback <- liftJSM $ function $ \_ _ (v : _) -> do
+    result <- liftJSM $ getSnapshotData v
     liftIO $ putMVar responseRef result
-  _ <- liftJSM $ result ^. (js0 ("get" :: String) . js1 ("then" :: String) callback)
+  _ <- liftJSM $ collectionResult ^. (js0 ("get" :: String) . js1 ("then" :: String) callback)
   liftIO $ takeMVar responseRef
 
 -- WRITE
@@ -161,7 +161,7 @@ dynAdd ::
   m ()
 dynAdd dynRoute itemE = do
   db <- askDb
-  let act (route, item) callback = liftJSM $ do
+  let act (route, item) _ = liftJSM $ do
         result <- db ^. js1 ("collection" :: String) (renderRoute route)
         void $ result ^. js1 ("add" :: String) item
   _ <- performEventAsync (act <$> attach (current dynRoute) itemE)
@@ -313,8 +313,8 @@ subscribeDoc route i = do
   let act callback = do
         result <- collection $ Query route []
         liftJSM $ do
-          jsCallback <- asyncFunction $ \_ _ [val] -> do
-            dataResult <- val ^. js0 ("data" :: String) >>= fromJSValUnchecked
+          jsCallback <- asyncFunction $ \_ _ (v : _) -> do
+            dataResult <- v ^. js0 ("data" :: String) >>= fromJSValUnchecked
             liftIO $ callback (Just dataResult)
           void $ result ^. (js1 @String "doc" i . js1 @String "onSnapshot" jsCallback)
   resultE <- performEventAsync (act <$ postBuild)
@@ -336,9 +336,9 @@ subscribe q = do
   let act callback = do
         result <- collection q
         liftJSM $ do
-          jsCallback <- asyncFunction $ \_ _ (val : _) -> do
-            result <- liftJSM $ getSnapshotData val
-            liftIO $ callback result
+          jsCallback <- asyncFunction $ \_ _ (v : _) -> do
+            r <- liftJSM $ getSnapshotData v
+            liftIO $ callback r
           void $ result ^. js1 ("onSnapshot" :: String) jsCallback
   resultE <- performEventAsync (act <$ postBuild)
   holdDyn [] resultE
@@ -358,8 +358,8 @@ dynSubscribe dynQuery = do
   let act q callback = liftJSM $ do
         baseCollection <- db ^. js1 ("collection" :: String) (renderRoute $ query_route q)
         result <- applyParams (query_params q) baseCollection
-        jsCallback <- asyncFunction $ \_ _ (val : _) -> do
-          resultData <- getSnapshotData val
+        jsCallback <- asyncFunction $ \_ _ (v : _) -> do
+          resultData <- getSnapshotData v
           liftIO $ callback resultData
         void $ result ^. js1 ("onSnapshot" :: String) jsCallback
   resultE <- performEventAsync (act <$> updated dynQuery)
@@ -375,36 +375,21 @@ collection q = do
     baseCollection <- db ^. js1 ("collection" :: String) (renderRoute $ query_route q)
     applyParams (query_params q) baseCollection
 
-dynCollection ::
-  ( Route q r,
-    PerformEvent t m,
-    MonadHold t m,
-    MonadFirebase m,
-    MonadFirebase (Performable m)
-  ) =>
-  Dynamic t (Query q r) ->
-  m (Dynamic t JSVal)
-dynCollection dynQuery = do
-  initialQuery <- sample $ current dynQuery
-  initialResult <- collection initialQuery
-  updateE <- performEvent $ collection <$> updated dynQuery
-  holdDyn initialResult updateE
-
 applyParams :: [QueryParam] -> JSVal -> JSM JSVal
-applyParams q c =
-  foldM applyParam c q
+applyParams q v =
+  foldM applyParam v q
   where
     applyParam c = \case
       Where left op right ->
         c ^. js3 ("where" :: String) left (show op) right
-      Limit count ->
-        c ^. js1 ("limit" :: String) count
+      Limit cnt ->
+        c ^. js1 ("limit" :: String) cnt
       OrderBy field direction ->
         c ^. js2 ("orderBy" :: String) field (show direction)
 
 getSnapshotData :: (MonadJSM m, FromJSVal r) => JSVal -> m [(Id, r)]
-getSnapshotData val = liftJSM $ do
-  snapshotObj <- makeObject val
+getSnapshotData v = liftJSM $ do
+  snapshotObj <- makeObject v
   docs <- getProp "docs" snapshotObj >>= fromJSValUnchecked
   liftJSM $
     traverse
@@ -415,5 +400,5 @@ getSnapshotData val = liftJSM $ do
       )
       (docs :: [JSVal])
 
-consoleLog val =
-  void $ jsg ("console" :: String) ^. js1 ("log" :: String) val
+-- consoleLog val =
+--   void $ jsg ("console" :: String) ^. js1 ("log" :: String) val
