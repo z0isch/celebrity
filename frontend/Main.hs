@@ -71,9 +71,11 @@ main =
             pure p
           Just p -> pure p
         urlD <- switchHold never newGameE >>= route . fmap (maybe "/" (\(Id i) -> "?id=" <> i))
-        newGameE <- dyn $ ffor urlD $ \u -> case u ^. U.queryL . U.queryPairsL of
-          [("id", i)] -> Nothing <$$ inGameWidget (Id $ E.decodeUtf8 i) player
-          _ -> Just <$$> newGameWidget
+        newGameE <- dyn
+          $ ffor urlD
+          $ \u -> case u ^. U.queryL . U.queryPairsL of
+            [("id", i)] -> Nothing <$$ inGameWidget (Id $ E.decodeUtf8 i) player
+            _ -> Just <$$> newGameWidget
         pure ()
 
 loading :: (DomBuilder t0 m) => m ()
