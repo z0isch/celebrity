@@ -15,7 +15,7 @@
 module Main where
 
 import Celebrity.Types
-import Control.Lens
+import Control.Lens ((^.), at, foldMapOf)
 import Control.Monad
 import Control.Monad.Fix
 import Data.Function
@@ -24,9 +24,15 @@ import qualified Data.Map.Strict as Map
 import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as E
+import JSDOM (currentWindowUnchecked)
+import JSDOM.Custom.Window (getLocalStorage)
+import JSDOM.Storage (getItem, setItem)
 import Language.Javascript.JSaddle
 import Reflex.Dom
 import Reflex.Firebase
+import Reflex.Router
+import qualified URI.ByteString as U
 
 firebaseConfig :: Config
 firebaseConfig =
@@ -56,13 +62,23 @@ main =
     script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
     void $ widgetHold loading
       $ ffor (domEvent Load script1)
-      $ \_ -> flip runFirebase firebaseConfig $ do
-        mfbD <- subscribeDoc @R @FireBaseState R1 (Id "jcmKQtFxX63H8QoPvII8") >>= maybeDyn
-        void $ dyn $ ffor mfbD $ \case
-          Nothing -> loading
-          Just fbD -> do
-            listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
-            void $ dyn $ (widgetPicker fbD . _fireBaseStateState) <$> listenableChanges
+      $ \_ -> flip runFirebase firebaseConfig $ mdo
+        storage <- currentWindowUnchecked >>= getLocalStorage
+        player <- getItem @_ @Text @Player storage "player" >>= \case
+          Nothing -> do
+            p <- Player <$> liftJSM randText
+            setItem @_ @Text storage "player" p
+            pure p
+          Just p -> pure p
+        urlD <- route $ ffor newGameE $ \(Id i) -> "?id=" <> i
+        newGameE <- newGameWidget
+        void $ dyn $ ffor urlD $ \u -> case u ^. U.queryL . U.queryPairsL of
+          [("id", i)] -> inGameWidget (Id $ E.decodeUtf8 i) player
+          _ -> errorPre
+        pure ()
+
+errorPre :: (DomBuilder t0 m) => m ()
+errorPre = el "pre" $ text "Error"
 
 loading :: (DomBuilder t0 m) => m ()
 loading = el "pre" $ text "Loading"
@@ -70,6 +86,47 @@ loading = el "pre" $ text "Loading"
 shouldWidgetKeepLocalState :: GameState -> GameState -> Bool
 shouldWidgetKeepLocalState (WritingQuestions _) (WritingQuestions _) = True
 shouldWidgetKeepLocalState _ _ = False
+
+newGameWidget ::
+  forall t m.
+  ( DomBuilder t m,
+    PostBuild t m,
+    MonadFirebase m,
+    PerformEvent t m,
+    MonadJSM (Performable m)
+  ) =>
+  m (Event t Id)
+newGameWidget = do
+  el "h1" $ text "Celebrity"
+  newGameClickE :: Event t () <- domEvent Click . fst <$$> el' "button" $ text "Start a new game"
+  db <- askDb
+  performEvent
+    $ ffor newGameClickE
+    $ \(_ :: ()) -> liftJSM $ do
+      (i, item) <- (,) <$> (Id <$> randText) <*> initialState
+      set' db R1 (i, item)
+      pure i
+
+inGameWidget ::
+  ( DomBuilder t m,
+    MonadHold t m,
+    PerformEvent t m,
+    TriggerEvent t m,
+    PostBuild t m,
+    MonadFirebase m,
+    MonadFirebase (Performable m),
+    MonadFix m
+  ) =>
+  Id ->
+  Player ->
+  m ()
+inGameWidget i p = do
+  mfbD <- subscribeDoc @R @FireBaseState R1 i >>= maybeDyn
+  void $ dyn $ ffor mfbD $ \case
+    Nothing -> loading
+    Just fbD -> do
+      listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
+      void $ dyn $ (widgetPicker fbD i p . _fireBaseStateState) <$> listenableChanges
 
 widgetPicker ::
   ( DomBuilder t m,
@@ -82,13 +139,15 @@ widgetPicker ::
     MonadFirebase m
   ) =>
   Dynamic t FireBaseState ->
+  Id ->
+  Player ->
   GameState ->
   m ()
-widgetPicker fbD = \case
+widgetPicker fbD i p = \case
   WritingQuestions s -> do
-    saveWordListE <- writingQuestionsWidget fbD (Player "b") s
+    saveWordListE <- writingQuestionsWidget fbD p s
     _ <- transactionUpdate R1 $ ffor saveWordListE $ \wl ->
-      ( Id "jcmKQtFxX63H8QoPvII8",
+      ( i,
         HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
           WritingQuestions _ ->
             Just $
@@ -96,7 +155,7 @@ widgetPicker fbD = \case
                 & fireBaseStateState
                 . _WritingQuestions
                 . writingQuestionStatePlayersWords
-                . at (Player "b")
+                . at p
                 .~ NE.nonEmpty (filter (not . T.null) wl)
           _ -> Nothing
       )
@@ -122,16 +181,15 @@ writingQuestionsWidget ::
   WritingQuestionState ->
   m (Event t [Text])
 writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = do
-  let totalWordsSubmittedD =
-        ffor fbD $
-          foldMapOf
-            ( fireBaseStateState
-                . _WritingQuestions
-                . writingQuestionStatePlayersWords
-            )
-            (foldMap (Sum . NE.length))
+  let -- totalWordsSubmittedD =
+      --     ffor fbD $
+      --       foldMapOf
+      --         ( fireBaseStateState
+      --             . _WritingQuestions
+      --             . writingQuestionStatePlayersWords
+      --         )
+      --         (foldMap (Sum . NE.length))
       initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
-  el "div" $ display totalWordsSubmittedD
   wordListD <- el "div" $ wordList initWords
   tagPromptlyDyn wordListD . domEvent Click . fst <$$> el' "button" $ text "Save Word List"
 
@@ -166,49 +224,49 @@ wordList initWords = mdo
   (addWordButton, _) <- el' "button" $ text "Add"
   pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> wordListInputs
 
-firebaseTest ::
-  ( MonadJSM m,
-    PerformEvent t m,
-    PostBuild t m,
-    TriggerEvent t m,
-    MonadHold t m,
-    DomBuilder t m,
-    MonadFix m,
-    MonadJSM (Performable m)
-  ) =>
-  m ()
-firebaseTest = do
-  script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
-  void $ widgetHold (el "pre" $ text "Loading")
-    $ ffor (domEvent Load script1)
-    $ \_ -> flip runFirebase firebaseConfig $ do
-      pbE <- getPostBuild
-      randE <- performEvent $ liftJSM randRevision <$ pbE
-      fbD <- subscribe (Query @R @FireBaseState R1 [])
-      --add @R @FireBaseState R1 (FireBaseState (WritingQuestions (WritingQuestionState mempty)) <$> randE)
-      (transD1, transD2) <-
-        (,)
-          <$> ( transactionUpdate R1
-                  $ ffor randE
-                  $ \_ ->
-                    ( Id "jcmKQtFxX63H8QoPvII8",
-                      OnlyCurrent $
-                        FireBaseState
-                          (WritingQuestions (WritingQuestionState (Player "a" =: (NE.fromList ["oh yeah"]))))
-                          (Revision "3775987453")
-                    )
-              )
-          <*> ( transactionUpdate R1
-                  $ ffor randE
-                  $ \_ ->
-                    ( Id "jcmKQtFxX63H8QoPvII8",
-                      OnlyCurrent $
-                        FireBaseState
-                          (WritingQuestions (WritingQuestionState (Player "b" =: (NE.fromList ["baby"]))))
-                          (Revision "3775987453")
-                    )
-              )
-      el "pre" $ display transD1
-      el "pre" $ display transD2
-      _ <- el "ol" $ simpleList fbD $ \d -> el "li" $ display d
-      pure ()
+-- firebaseTest ::
+--   ( MonadJSM m,
+--     PerformEvent t m,
+--     PostBuild t m,
+--     TriggerEvent t m,
+--     MonadHold t m,
+--     DomBuilder t m,
+--     MonadFix m,
+--     MonadJSM (Performable m)
+--   ) =>
+--   m ()
+-- firebaseTest = do
+--   script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
+--   void $ widgetHold (el "pre" $ text "Loading")
+--     $ ffor (domEvent Load script1)
+--     $ \_ -> flip runFirebase firebaseConfig $ do
+--       pbE <- getPostBuild
+--       randE <- performEvent $ liftJSM randRevision <$ pbE
+--       fbD <- subscribe (Query @R @FireBaseState R1 [])
+--       --add @R @FireBaseState R1 (FireBaseState (WritingQuestions (WritingQuestionState mempty)) <$> randE)
+--       (transD1, transD2) <-
+--         (,)
+--           <$> ( transactionUpdate R1
+--                   $ ffor randE
+--                   $ \_ ->
+--                     ( Id "jcmKQtFxX63H8QoPvII8",
+--                       OnlyCurrent $
+--                         FireBaseState
+--                           (WritingQuestions (WritingQuestionState (Player "a" =: (NE.fromList ["oh yeah"]))))
+--                           (Revision "3775987453")
+--                     )
+--               )
+--           <*> ( transactionUpdate R1
+--                   $ ffor randE
+--                   $ \_ ->
+--                     ( Id "jcmKQtFxX63H8QoPvII8",
+--                       OnlyCurrent $
+--                         FireBaseState
+--                           (WritingQuestions (WritingQuestionState (Player "b" =: (NE.fromList ["baby"]))))
+--                           (Revision "3775987453")
+--                     )
+--               )
+--       el "pre" $ display transD1
+--       el "pre" $ display transD2
+--       _ <- el "ol" $ simpleList fbD $ \d -> el "li" $ display d
+--       pure ()

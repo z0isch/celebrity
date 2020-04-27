@@ -21,15 +21,16 @@ module Reflex.Firebase
     Route (..),
     Id (..),
     HasId (..),
-    MonadFirebase,
+    MonadFirebase (..),
     Revision (..),
     HasRevision (..),
     TransactionUpdate (..),
-    randRevision,
+    randText,
     runFirebase,
     add,
     dynAdd,
     set,
+    set',
     update,
     delete,
     query,
@@ -37,6 +38,7 @@ module Reflex.Firebase
     subscribeDoc,
     dynSubscribe,
     transactionUpdate,
+    collection',
   )
 where
 
@@ -140,7 +142,12 @@ query q = do
 
 -- WRITE
 add ::
-  (Route q r, MonadFirebase m, MonadFirebase (Performable m), PerformEvent t m) =>
+  forall q r t m.
+  ( Route q r,
+    MonadFirebase m,
+    MonadFirebase (Performable m),
+    PerformEvent t m
+  ) =>
   q r ->
   Event t r ->
   m ()
@@ -167,17 +174,31 @@ dynAdd dynRoute itemE = do
   _ <- performEventAsync (act <$> attach (current dynRoute) itemE)
   pure ()
 
-set ::
-  (HasId r, MonadFirebase m, MonadFirebase (Performable m), PerformEvent t m, Route q r) =>
+set' ::
+  forall q r.
+  ( Route q r
+  ) =>
+  JSVal ->
   q r ->
-  Event t r ->
+  (Id, r) ->
+  JSM ()
+set' db route (i, item) = do
+  result <- collection' db $ Query route []
+  document <- result ^. js1 ("doc" :: String) i
+  void $ document ^. js1 ("set" :: String) item
+
+set ::
+  forall q r t m.
+  (MonadFirebase m, MonadFirebase (Performable m), PerformEvent t m, Route q r) =>
+  q r ->
+  Event t (Id, r) ->
   m ()
 set route itemE = do
   result <- collection $ Query route []
   void $ performEvent $
     fmap
-      ( \item -> liftJSM $ do
-          document <- result ^. js1 ("doc" :: String) (getId item)
+      ( \(i, item) -> liftJSM $ do
+          document <- result ^. js1 ("doc" :: String) i
           document ^. js1 ("set" :: String) item
       )
       itemE
@@ -226,8 +247,8 @@ class HasRevision r where
   getRevision :: r -> Revision
   setRevision :: r -> Revision -> r
 
-randRevision :: JSM Revision
-randRevision = eval @String "window.crypto.getRandomValues(new Uint32Array(1))[0].toString()" >>= fromJSValUnchecked
+randText :: JSM Text
+randText = eval @String "window.crypto.getRandomValues(new Uint32Array(1))[0].toString()" >>= fromJSValUnchecked
 
 data TransactionUpdate r
   = OnlyCurrent r
@@ -253,7 +274,7 @@ transactionUpdate route transWriteE = do
         documentRef <- liftJSM $ result ^. js1 ("doc" :: String) i
         let getCb transaction = fun $ \_ _ [returnCb, doc] -> do
               currentItemStored <- doc ^. js0 @String "data" >>= fromJSValUnchecked @r
-              newRevision <- randRevision
+              newRevision <- Revision <$> randText
               case transWrite of
                 OnlyCurrent item -> do
                   if getRevision currentItemStored == getRevision item
@@ -364,6 +385,15 @@ dynSubscribe dynQuery = do
         void $ result ^. js1 ("onSnapshot" :: String) jsCallback
   resultE <- performEventAsync (act <$> updated dynQuery)
   holdDyn [] resultE
+
+collection' ::
+  (Route q r) =>
+  JSVal ->
+  Query q r ->
+  JSM JSVal
+collection' db q = do
+  baseCollection <- db ^. js1 ("collection" :: String) (renderRoute $ query_route q)
+  applyParams (query_params q) baseCollection
 
 collection ::
   (MonadFirebase m, Route q r) =>

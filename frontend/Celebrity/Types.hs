@@ -40,6 +40,12 @@ instance ToJSVal Player where
 instance FromJSVal Player where
   fromJSVal = fromJSValAesonText
 
+instance ToJSString Player where
+  toJSString (Player p) = toJSString p
+
+instance FromJSString Player where
+  fromJSString = Player . fromJSString
+
 data WritingQuestionState = WritingQuestionState
   { _writingQuestionStatePlayersWords :: Map Player (NonEmpty Text)
   }
@@ -77,6 +83,15 @@ instance ToJSVal GameState where
 
 instance FromJSVal GameState where
   fromJSVal = fromJSValAesonText
+
+initialState :: JSM FireBaseState
+initialState = do
+  _fireBaseStateRevision <- Revision <$> randText
+  pure $
+    FireBaseState
+      { _fireBaseStateState = WritingQuestions WritingQuestionState {_writingQuestionStatePlayersWords = mempty},
+        _fireBaseStateRevision
+      }
 
 data FireBaseState = FireBaseState
   { _fireBaseStateState :: GameState,
