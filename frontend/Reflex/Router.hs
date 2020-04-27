@@ -37,7 +37,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import GHCJS.Foreign (isFunction)
-import GHCJS.Marshal.Pure (pFromJSVal)
 import JSDOM (currentDocumentUnchecked, currentWindowUnchecked)
 import JSDOM.Document (createEvent)
 import JSDOM.Event (initEvent)
@@ -48,7 +47,7 @@ import JSDOM.History (History, back, forward, pushState)
 import JSDOM.Location (getHref)
 import JSDOM.PopStateEvent
 import qualified JSDOM.Types as DOM
-import JSDOM.Types (Location (..), PopStateEvent (..))
+import JSDOM.Types (Location (..), PopStateEvent (..), pFromJSVal)
 import JSDOM.Types (MonadJSM, uncheckedCastTo)
 import JSDOM.Window (getHistory, getLocation)
 import qualified Language.Javascript.JSaddle as JS
