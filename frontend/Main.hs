@@ -70,22 +70,14 @@ main =
             setItem @_ @Text storage "player" p
             pure p
           Just p -> pure p
-        urlD <- route $ ffor newGameE $ \(Id i) -> "?id=" <> i
-        newGameE <- newGameWidget
-        void $ dyn $ ffor urlD $ \u -> case u ^. U.queryL . U.queryPairsL of
-          [("id", i)] -> inGameWidget (Id $ E.decodeUtf8 i) player
-          _ -> errorPre
+        urlD <- switchHold never newGameE >>= route . fmap (maybe "/" (\(Id i) -> "?id=" <> i))
+        newGameE <- dyn $ ffor urlD $ \u -> case u ^. U.queryL . U.queryPairsL of
+          [("id", i)] -> Nothing <$$ inGameWidget (Id $ E.decodeUtf8 i) player
+          _ -> Just <$$> newGameWidget
         pure ()
-
-errorPre :: (DomBuilder t0 m) => m ()
-errorPre = el "pre" $ text "Error"
 
 loading :: (DomBuilder t0 m) => m ()
 loading = el "pre" $ text "Loading"
-
-shouldWidgetKeepLocalState :: GameState -> GameState -> Bool
-shouldWidgetKeepLocalState (WritingQuestions _) (WritingQuestions _) = True
-shouldWidgetKeepLocalState _ _ = False
 
 newGameWidget ::
   forall t m.
@@ -98,7 +90,7 @@ newGameWidget ::
   m (Event t Id)
 newGameWidget = do
   el "h1" $ text "Celebrity"
-  newGameClickE :: Event t () <- domEvent Click . fst <$$> el' "button" $ text "Start a new game"
+  newGameClickE <- domEvent Click . fst <$$> el' "button" $ text "Start a new game"
   db <- askDb
   performEvent
     $ ffor newGameClickE
@@ -106,6 +98,10 @@ newGameWidget = do
       (i, item) <- (,) <$> (Id <$> randText) <*> initialState
       set' db R1 (i, item)
       pure i
+
+shouldWidgetKeepLocalState :: GameState -> GameState -> Bool
+shouldWidgetKeepLocalState (WritingQuestions _) (WritingQuestions _) = True
+shouldWidgetKeepLocalState _ _ = False
 
 inGameWidget ::
   ( DomBuilder t m,
@@ -119,14 +115,16 @@ inGameWidget ::
   ) =>
   Id ->
   Player ->
-  m ()
+  m (Event t ())
 inGameWidget i p = do
   mfbD <- subscribeDoc @R @FireBaseState R1 i >>= maybeDyn
-  void $ dyn $ ffor mfbD $ \case
-    Nothing -> loading
+  exitGameClickE <- dyn $ ffor mfbD $ \case
+    Nothing -> never <$ loading
     Just fbD -> do
       listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
       void $ dyn $ (widgetPicker fbD i p . _fireBaseStateState) <$> listenableChanges
+      domEvent Click . fst <$$> el' "button" $ text "Leave game"
+  switchHold never exitGameClickE
 
 widgetPicker ::
   ( DomBuilder t m,
