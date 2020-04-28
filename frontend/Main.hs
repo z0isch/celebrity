@@ -92,7 +92,7 @@ main =
               urlD <- do
                 flatNewGameE <- switchHold never newGameE
                 let gameE = leftmost [Nothing <$ leaveGameE, Just <$> flatNewGameE]
-                route $ fmap (maybe "/" (\(Id i) -> "?id=" <> i)) gameE
+                route $ fmap (maybe "?" (\(Id i) -> "?id=" <> i)) gameE
               let inGameD = ffor urlD $
                     \u -> case u ^. U.queryL . U.queryPairsL of
                       [("id", i)] -> Just $ Id $ E.decodeUtf8 i
