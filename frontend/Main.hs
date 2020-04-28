@@ -59,16 +59,16 @@ infixl 4 <$$>
 widgetHead :: (DomBuilder t m) => m ()
 widgetHead = do
   el "title" $ text "Celebrity"
-  void $
-    elAttr
-      "link"
-      ( mconcat
-          [ "rel" =: "stylesheet",
-            "type" =: "text/css",
-            "href" =: "https://cdn.jsdelivr.net/npm/bulma@0.8.2/css/bulma.min.css"
-          ]
-      )
-      blank
+  elAttr "meta" (mconcat ["name" =: "viewport", "content" =: "width=device-width, initial-scale=1"]) blank
+  elAttr
+    "link"
+    ( mconcat
+        [ "rel" =: "stylesheet",
+          "type" =: "text/css",
+          "href" =: "https://cdn.jsdelivr.net/npm/bulma@0.8.2/css/bulma.min.css"
+        ]
+    )
+    blank
 
 main :: IO ()
 main =
@@ -275,11 +275,11 @@ wordList initWords = mdo
               <$> inputElement
                 ( def
                     & inputElementConfig_initialValue .~ initialVal
-                    & inputElementConfig_elementConfig . elementConfig_initialAttributes .~ ("class" =: "input is-large")
+                    & inputElementConfig_elementConfig . elementConfig_initialAttributes .~ ("class" =: "input")
                 )
         removeClickE <-
           elAttr "div" ("class" =: "control") $
-            (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger is-large") $ text "X"))
+            (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $ text "X"))
         pure (inputE, removeClickE)
   (addWordButton, _) <- el' "button" $ text "Add"
   pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> wordListInputs
