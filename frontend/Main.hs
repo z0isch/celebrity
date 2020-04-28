@@ -85,10 +85,9 @@ main =
             pure p
           Just p -> pure p
         leaveGameE <- navbar inGameD
-        inGameD <- elAttr "section" ("class" =: "hero is-info is-fullheight-with-navbar") $ do
+        inGameD <- elAttr "section" ("class" =: "hero is-link is-fullheight-with-navbar") $ do
           elAttr "div" ("class" =: "hero-body") $ do
             elAttr "div" ("class" =: "container has-text-centered") $ mdo
-              -- TODO: Fix routing here- we lose the current path
               urlD <- do
                 flatNewGameE <- switchHold never newGameE
                 let gameE = leftmost [Nothing <$ leaveGameE, Just <$> flatNewGameE]
@@ -175,9 +174,6 @@ inGameWidget i p = do
       listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
       void $ dyn $ (widgetPicker fbD i p . _fireBaseStateState) <$> listenableChanges
 
---domEvent Click . fst <$$> el' "button" $ text "Leave game"
---switchHold never exitGameClickE
-
 widgetPicker ::
   ( DomBuilder t m,
     PostBuild t m,
@@ -253,7 +249,9 @@ wordList ::
   [Text] ->
   m (Dynamic t [Text])
 wordList initWords = mdo
-  let initWordsMap = Map.fromList $ zip [0 ..] initWords
+  let initWordsMap =
+        Map.fromList $ zip [0 ..] $
+          if null initWords then [""] else initWords
       wordListDeletE = switchDyn $ leftmost . Map.elems . fmap snd <$> wordListInputs
       wordListAddE = domEvent Click addWordButton
       onWordListMod (Left _) xs =

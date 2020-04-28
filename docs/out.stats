@@ -16,7 +16,7 @@ integer-gmp:             6323
 integer-logarithms-1.0.3-8EbIvyaPt1VK2rKaCK88I2:1008
 jsaddle-0.9.7.0-9a2eUscARIGHd7M443yb4y:8511
 jsaddle-dom-0.9.4.0-9ydXimswNwQ1Zyfj1vQw4V:92633
-main:                    801474
+main:                    801939
 patch-0.0.3.1-JAUSkOPIwnhIL2tlx9DcxV:65875
 primitive-0.6.3.0-KfguiTuxgILGqu8JEOpKRI:787
 profunctors-5.3-DHTygzKhBwfHDZxyqvE4Yl:1516
@@ -223,7 +223,7 @@ jsaddle-dom-0.9.4.0-9ydXimswNwQ1Zyfj1vQw4V
     JSDOM.Types:                        16122
 
 main
-    Celebrity.Types:                    469587
+    Celebrity.Types:                    470052
     Main:                               189034
     Reflex.Firebase:                    87808
     Reflex.Router:                      55045
@@ -318,5 +318,5 @@ vector-0.12.0.1-JBzPOpMr95X6eo7FFRUEn5
 
 
 
-packed metadata: 1298906
+packed metadata: 1299172
 
