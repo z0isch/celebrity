@@ -56,9 +56,23 @@ infixl 4 <$$
 
 infixl 4 <$$>
 
+widgetHead :: (DomBuilder t m) => m ()
+widgetHead = do
+  el "title" $ text "Celebrity"
+  void $
+    elAttr
+      "link"
+      ( mconcat
+          [ "rel" =: "stylesheet",
+            "type" =: "text/css",
+            "href" =: "https://cdn.jsdelivr.net/npm/bulma@0.8.2/css/bulma.min.css"
+          ]
+      )
+      blank
+
 main :: IO ()
 main =
-  mainWidget $ do
+  mainWidgetWithHead widgetHead $ do
     script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
     void $ widgetHold loading
       $ ffor (domEvent Load script1)
@@ -70,16 +84,49 @@ main =
             setItem @_ @Text storage "player" p
             pure p
           Just p -> pure p
-        urlD <- switchHold never newGameE >>= route . fmap (maybe "/" (\(Id i) -> "?id=" <> i))
-        newGameE <- dyn
-          $ ffor urlD
-          $ \u -> case u ^. U.queryL . U.queryPairsL of
-            [("id", i)] -> Nothing <$$ inGameWidget (Id $ E.decodeUtf8 i) player
-            _ -> Just <$$> newGameWidget
+        leaveGameE <- navbar inGameD
+        inGameD <- elAttr "section" ("class" =: "hero is-info is-fullheight-with-navbar") $ do
+          elAttr "div" ("class" =: "hero-body") $ do
+            elAttr "div" ("class" =: "container has-text-centered") $ mdo
+              -- TODO: Fix routing here- we lose the current path
+              urlD <- do
+                flatNewGameE <- switchHold never newGameE
+                let gameE = leftmost [Nothing <$ leaveGameE, Just <$> flatNewGameE]
+                route $ fmap (maybe "/" (\(Id i) -> "?id=" <> i)) gameE
+              let inGameD = ffor urlD $
+                    \u -> case u ^. U.queryL . U.queryPairsL of
+                      [("id", i)] -> Just $ Id $ E.decodeUtf8 i
+                      _ -> Nothing
+              newGameE <- dyn
+                $ ffor inGameD
+                $ \case
+                  Just i -> do
+                    inGameWidget i player
+                    pure never
+                  Nothing -> newGameWidget
+              pure inGameD
         pure ()
 
+navbar ::
+  ( DomBuilder t m,
+    PostBuild t m,
+    MonadHold t m
+  ) =>
+  Dynamic t (Maybe Id) ->
+  m (Event t ())
+navbar inGameD = elAttr "nav" (mconcat ["class" =: "navbar is-fixed-top is-light", "role" =: "navigation"]) $ do
+  elAttr "div" ("class" =: "navbar-brand") $ do
+    elAttr "div" ("class" =: "navbar-item") $ do
+      el "h1" $ text "Celebrity"
+    leaveGameE <- dyn $ ffor inGameD $ \case
+      Nothing -> never <$ blank
+      Just _ -> elAttr "div" (mconcat ["class" =: "navbar-item", "style" =: "margin-left:auto;"]) $ do
+        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $ text "Leave game"
+    switchHold never leaveGameE
+
 loading :: (DomBuilder t0 m) => m ()
-loading = el "pre" $ text "Loading"
+loading = elAttr "div" ("class" =: "message is-info") $ do
+  elAttr "div" ("class" =: "message-body") $ text "Loading"
 
 newGameWidget ::
   forall t m.
@@ -91,8 +138,10 @@ newGameWidget ::
   ) =>
   m (Event t Id)
 newGameWidget = do
-  el "h1" $ text "Celebrity"
-  newGameClickE <- domEvent Click . fst <$$> el' "button" $ text "Start a new game"
+  elAttr "h1" ("class" =: "title") $ text "Celebrity"
+  newGameClickE <-
+    domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-large is-fullwidth is-success") $
+      text "Start a new game"
   db <- askDb
   performEvent
     $ ffor newGameClickE
@@ -117,16 +166,17 @@ inGameWidget ::
   ) =>
   Id ->
   Player ->
-  m (Event t ())
+  m ()
 inGameWidget i p = do
   mfbD <- subscribeDoc @R @FireBaseState R1 i >>= maybeDyn
-  exitGameClickE <- dyn $ ffor mfbD $ \case
-    Nothing -> never <$ loading
+  void $ dyn $ ffor mfbD $ \case
+    Nothing -> loading
     Just fbD -> do
       listenableChanges <- holdUniqDynBy (shouldWidgetKeepLocalState `on` _fireBaseStateState) fbD
       void $ dyn $ (widgetPicker fbD i p . _fireBaseStateState) <$> listenableChanges
-      domEvent Click . fst <$$> el' "button" $ text "Leave game"
-  switchHold never exitGameClickE
+
+--domEvent Click . fst <$$> el' "button" $ text "Leave game"
+--switchHold never exitGameClickE
 
 widgetPicker ::
   ( DomBuilder t m,
@@ -213,60 +263,23 @@ wordList initWords = mdo
   wordListD <-
     foldDyn onWordListMod initWordsMap $
       leftmost [Left <$> wordListAddE, Right <$> wordListDeletE]
-  wordListInputs <- el "ol"
+  wordListInputs <- elAttr "div" ("class" =: "content is-large")
+    $ el "ol"
     $ listWithKey wordListD
     $ \i v ->
-      el "li" $ do
+      el "li" $ elAttr "div" ("class" =: "field has-addons") $ do
         initialVal <- sample $ current v
-        (,)
-          <$> (_inputElement_value <$> inputElement (def & inputElementConfig_initialValue .~ initialVal))
-          <*> (i <$$ (domEvent Click . fst <$$> el' "button" $ text "X"))
+        inputE <-
+          elAttr "div" ("class" =: "control is-expanded") $
+            _inputElement_value
+              <$> inputElement
+                ( def
+                    & inputElementConfig_initialValue .~ initialVal
+                    & inputElementConfig_elementConfig . elementConfig_initialAttributes .~ ("class" =: "input is-large")
+                )
+        removeClickE <-
+          elAttr "div" ("class" =: "control") $
+            (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger is-large") $ text "X"))
+        pure (inputE, removeClickE)
   (addWordButton, _) <- el' "button" $ text "Add"
   pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> wordListInputs
-
--- firebaseTest ::
---   ( MonadJSM m,
---     PerformEvent t m,
---     PostBuild t m,
---     TriggerEvent t m,
---     MonadHold t m,
---     DomBuilder t m,
---     MonadFix m,
---     MonadJSM (Performable m)
---   ) =>
---   m ()
--- firebaseTest = do
---   script1 <- fst <$> elAttr' "script" ("src" =: "https://www.gstatic.com/firebasejs/7.14.1/firebase.js") blank
---   void $ widgetHold (el "pre" $ text "Loading")
---     $ ffor (domEvent Load script1)
---     $ \_ -> flip runFirebase firebaseConfig $ do
---       pbE <- getPostBuild
---       randE <- performEvent $ liftJSM randRevision <$ pbE
---       fbD <- subscribe (Query @R @FireBaseState R1 [])
---       --add @R @FireBaseState R1 (FireBaseState (WritingQuestions (WritingQuestionState mempty)) <$> randE)
---       (transD1, transD2) <-
---         (,)
---           <$> ( transactionUpdate R1
---                   $ ffor randE
---                   $ \_ ->
---                     ( Id "jcmKQtFxX63H8QoPvII8",
---                       OnlyCurrent $
---                         FireBaseState
---                           (WritingQuestions (WritingQuestionState (Player "a" =: (NE.fromList ["oh yeah"]))))
---                           (Revision "3775987453")
---                     )
---               )
---           <*> ( transactionUpdate R1
---                   $ ffor randE
---                   $ \_ ->
---                     ( Id "jcmKQtFxX63H8QoPvII8",
---                       OnlyCurrent $
---                         FireBaseState
---                           (WritingQuestions (WritingQuestionState (Player "b" =: (NE.fromList ["baby"]))))
---                           (Revision "3775987453")
---                     )
---               )
---       el "pre" $ display transD1
---       el "pre" $ display transD2
---       _ <- el "ol" $ simpleList fbD $ \d -> el "li" $ display d
---       pure ()
