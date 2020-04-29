@@ -10,8 +10,6 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 
--- {"tag":"WritingQuestions","contents":{"_writingQuestionStatePlayersWords":[[{"unPlayer":"a"},["yeah","yeah","yeah"]],[{"unPlayer":"b"},["Devin!","do-do connector "]]]}}
--- {"tag":"WaitingForRound"}
 module Main where
 
 import Celebrity.Types
@@ -226,18 +224,40 @@ writingQuestionsWidget ::
   Player ->
   WritingQuestionState ->
   m (Event t [Text])
-writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = do
-  let -- totalWordsSubmittedD =
-      --     ffor fbD $
-      --       foldMapOf
-      --         ( fireBaseStateState
-      --             . _WritingQuestions
-      --             . writingQuestionStatePlayersWords
-      --         )
-      --         (foldMap (Sum . NE.length))
+writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
+  let totalWordsSubmittedD =
+        ffor fbD $
+          getSum
+            . foldMapOf
+              ( fireBaseStateState
+                  . _WritingQuestions
+                  . writingQuestionStatePlayersWords
+              )
+              (foldMap (Sum . NE.length))
       initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
-  wordListD <- el "div" $ wordList initWords
-  tagPromptlyDyn wordListD . domEvent Click . fst <$$> el' "button" $ text "Save Word List"
+  showWordListD <- toggle (null initWords) toggleShowWordListE
+  toggleShowWordListEE <- dyn $ ffor showWordListD $ \case
+    False -> do
+      elAttr "div" ("class" =: "content") $ do
+        elAttr "h2" ("class" =: "is-large") $ dynText $ ffor totalWordsSubmittedD $ \t -> (T.pack $ show t) <> " word(s) submitted so far."
+      editWordListClickE <-
+        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-success") $
+          text "Edit Words"
+      pure $ Nothing <$ editWordListClickE
+    True -> do
+      words <- sample $ current wordD
+      elAttr "p" ("class" =: "title") $ text "Add some words then click save"
+      wordListD <- el "div" $ wordList words
+      el "br" blank
+      saveClickE <-
+        tagPromptlyDyn wordListD . domEvent Click . fst
+          <$$> elAttr' "button" ("class" =: "button is-success")
+          $ text "Save"
+      pure $ Just <$> saveClickE
+  toggleShowWordListE <- switchHold never toggleShowWordListEE
+  let wordListE = fmapMaybe id toggleShowWordListE
+  wordD <- holdDyn initWords wordListE
+  pure wordListE
 
 wordList ::
   forall m t.
@@ -279,5 +299,7 @@ wordList initWords = mdo
           elAttr "div" ("class" =: "control") $
             (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $ text "X"))
         pure (inputE, removeClickE)
-  (addWordButton, _) <- el' "button" $ text "Add"
+  (addWordButton, _) <-
+    elAttr' "button" ("class" =: "button") $
+      text "Add another word"
   pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> wordListInputs
