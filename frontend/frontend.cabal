@@ -33,6 +33,8 @@ executable frontend
                      , containers
                      , bytestring
                      , uri-bytestring
+                     , semialign
+                     , these
                      --, ghcjs-base
   ghc-options: -threaded -Wall
   -- hs-source-dirs:

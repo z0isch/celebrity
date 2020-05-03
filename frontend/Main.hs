@@ -13,16 +13,20 @@
 module Main where
 
 import Celebrity.Types
-import Control.Lens ((^.), at, foldMapOf)
+import Control.Lens ((%~), (^.), at, foldMapOf, view)
 import Control.Monad
 import Control.Monad.Fix
+import Control.Monad.IO.Class (MonadIO)
+import Data.Align (align)
 import Data.Function
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Monoid
+import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
+import Data.These
 import JSDOM (currentWindowUnchecked)
 import JSDOM.Custom.Window (getLocalStorage)
 import JSDOM.Storage (getItem, setItem)
@@ -90,18 +94,18 @@ main =
                 flatNewGameE <- switchHold never newGameE
                 let gameE = leftmost [Nothing <$ leaveGameE, Just <$> flatNewGameE]
                 route $ fmap (maybe "?" (\(Id i) -> "?id=" <> i)) gameE
-              let inGameD = ffor urlD $
+              let mgameIdD = ffor urlD $
                     \u -> case u ^. U.queryL . U.queryPairsL of
                       [("id", i)] -> Just $ Id $ E.decodeUtf8 i
                       _ -> Nothing
               newGameE <- dyn
-                $ ffor inGameD
+                $ ffor mgameIdD
                 $ \case
                   Just i -> do
                     inGameWidget i player
                     pure never
                   Nothing -> newGameWidget
-              pure inGameD
+              pure mgameIdD
         pure ()
 
 navbar ::
@@ -187,31 +191,100 @@ widgetPicker ::
   Player ->
   GameState ->
   m ()
-widgetPicker fbD i p = \case
+widgetPicker fbD i p gs = case gs of
   WritingQuestions s -> do
-    saveWordListE <- writingQuestionsWidget fbD p s
-    _ <- transactionUpdate R1 $ ffor saveWordListE $ \wl ->
-      ( i,
-        HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
-          WritingQuestions _ ->
-            Just $
+    writingQuestionE <- writingQuestionsWidget fbD p s
+    _ <- transactionUpdate R1 $ ffor (attachPromptlyDyn fbD writingQuestionE) $ \(fbs, wqe) ->
+      case wqe of
+        StartGame ->
+          ( i,
+            OnlyCurrent $
               fbs
                 & fireBaseStateState
-                . _WritingQuestions
-                . writingQuestionStatePlayersWords
-                . at p
-                .~ NE.nonEmpty (filter (not . T.null) wl)
-          _ -> Nothing
+                %~ handleWritingQuestionsEvent p wqe
+          )
+        SaveWords wl ->
+          ( i,
+            HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
+              WritingQuestions _ ->
+                Just $
+                  fbs
+                    & fireBaseStateState
+                    . _WritingQuestions
+                    . writingQuestionStatePlayersWords
+                    . at p
+                    .~ NE.nonEmpty (filter (not . T.null) wl)
+              _ -> Nothing
+          )
+    pure ()
+  BetweenRound s -> do
+    inRoundE <- traceEventWith show <$> betweenRoundWidget s
+    _ <- transactionUpdate R1 $ ffor (attachPromptlyDyn fbD inRoundE) $ \(fbs, irc) ->
+      ( i,
+        OnlyCurrent $
+          fbs
+            & fireBaseStateState
+            .~ ( InRound
+                   ( InRoundState
+                       { _inRoundStateCurrentPlayer = p,
+                         _inRoundStateCelebrityState = s ^. betweenRoundStateCelebrityState
+                       }
+                   )
+               )
       )
     pure ()
-  WaitingForRound -> waitingForRorRoundWidget
+  InRound s -> do
+    inRoundWidget p s
+    pure ()
 
-waitingForRorRoundWidget ::
-  ( DomBuilder t m
+betweenRoundWidget ::
+  (DomBuilder t m) =>
+  BetweenRoundState ->
+  m (Event t ())
+betweenRoundWidget s = do
+  elAttr "div" ("class" =: "tile is-ancestor") $ do
+    elAttr "div" ("class" =: "tile notification is-danger") $ do
+      elAttr "p" ("class" =: "title is-5") $ text "Team 1"
+      elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam1Score
+    myTurnE <- elAttr "div" ("class" =: "tile notification is-primary") $ do
+      elAttr "p" ("class" =: "title is-4") $ text $ "Round " <> T.pack (show (s ^. betweenRoundStateCelebrityState . celebrityStateRoundNum))
+      elAttr "p" ("class" =: "subtitle is-5") $ text $ (T.pack $ show $ length $ s ^. betweenRoundStateCelebrityState . celebrityStateFreeWords) <> " words left"
+      elAttr "p" ("class" =: "title is-5") $ text $ "Team " <> T.pack (show $ s ^. betweenRoundStateCelebrityState . celebrityStateCurrentTeam) <> " is up!"
+      domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-dark") $ text "My turn!"
+    elAttr "div" ("class" =: "tile notification is-danger") $ do
+      elAttr "p" ("class" =: "title is-5") $ text "Team 2"
+      elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam2Score
+    pure myTurnE
+
+inRoundWidget ::
+  ( DomBuilder t m,
+    PostBuild t m,
+    PerformEvent t m,
+    TriggerEvent t m,
+    MonadIO (Performable m),
+    MonadFirebase (Performable m),
+    MonadFirebase m,
+    MonadFix m,
+    MonadHold t m
   ) =>
-  m ()
-waitingForRorRoundWidget = do
-  el "h1" $ text "Waiting for Round"
+  Player ->
+  InRoundState ->
+  m (Event t [Text])
+inRoundWidget me s =
+  if me == (s ^. inRoundStateCurrentPlayer)
+    then do
+      tE <- tickLossyFromPostBuildTime 1
+      tD <- foldDyn (const pred) 2 tE
+      let hitZeroE = attachPromptlyDynWithMaybe (\left _ -> if left < 1 then Just () else Nothing) tD tE
+      isZeroD <- foldDyn (const . const True) False hitZeroE
+      el "pre" $ display tD
+      el "pre" $ display isZeroD
+      elAttr "div" ("class" =: "title is-3") $ text "Word 1"
+      elAttr "button" ("class" =: "button is-dark") $ text "Next"
+      pure never
+    else do
+      elAttr "div" ("class" =: "title is-2") $ text "Pay attention!"
+      pure never
 
 writingQuestionsWidget ::
   forall t m.
@@ -223,7 +296,7 @@ writingQuestionsWidget ::
   Dynamic t FireBaseState ->
   Player ->
   WritingQuestionState ->
-  m (Event t [Text])
+  m (Event t WritingQuestionsEvent)
 writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
   let totalWordsSubmittedD =
         ffor fbD $
@@ -243,21 +316,31 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
       editWordListClickE <-
         domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-success") $
           text "Edit Words"
-      pure $ Nothing <$ editWordListClickE
+      startGameClickE <-
+        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $
+          text "Start Game"
+      pure $ align (Nothing <$ editWordListClickE) startGameClickE
     True -> do
-      words <- sample $ current wordD
+      currentWords <- sample $ current wordD
       elAttr "p" ("class" =: "title") $ text "Add some words then click save"
-      wordListD <- el "div" $ wordList words
+      wordListD <- el "div" $ wordList currentWords
       el "br" blank
       saveClickE <-
         tagPromptlyDyn wordListD . domEvent Click . fst
           <$$> elAttr' "button" ("class" =: "button is-success")
           $ text "Save"
-      pure $ Just <$> saveClickE
+      pure $ (This . Just <$> saveClickE)
   toggleShowWordListE <- switchHold never toggleShowWordListEE
-  let wordListE = fmapMaybe id toggleShowWordListE
+  let wordListE = fmapMaybe (these id (const Nothing) (\a _ -> a)) toggleShowWordListE
   wordD <- holdDyn initWords wordListE
-  pure wordListE
+  pure $
+    fmapMaybe
+      ( these
+          (fmap SaveWords)
+          (const (Just StartGame))
+          (\a -> const (Just StartGame))
+      )
+      toggleShowWordListE
 
 wordList ::
   forall m t.
