@@ -35,6 +35,9 @@ executable frontend
                      , uri-bytestring
                      , semialign
                      , these
+                     , transformers
+                     , random
+                     , array
                      --, ghcjs-base
   ghc-options: -threaded -Wall
   -- hs-source-dirs:

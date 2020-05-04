@@ -8,29 +8,31 @@
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Main where
 
 import Celebrity.Types
-import Control.Lens ((%~), (^.), at, foldMapOf, view)
-import Control.Monad
-import Control.Monad.Fix
+import Control.Lens ((%~), (^.), (^?), at, foldMapOf)
+import Control.Monad (join, void)
+import Control.Monad.Fix (MonadFix)
 import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class
 import Data.Align (align)
-import Data.Function
+import Data.Function (on)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
-import Data.Monoid
-import qualified Data.Set as S
+import Data.Monoid (Sum (..))
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
-import Data.These
+import Data.These (These (..), these)
 import JSDOM (currentWindowUnchecked)
 import JSDOM.Custom.Window (getLocalStorage)
 import JSDOM.Storage (getItem, setItem)
-import Language.Javascript.JSaddle
+import Language.Javascript.JSaddle (MonadJSM, liftJSM)
 import Reflex.Dom
 import Reflex.Firebase
 import Reflex.Router
@@ -194,7 +196,7 @@ widgetPicker ::
 widgetPicker fbD i p gs = case gs of
   WritingQuestions s -> do
     writingQuestionE <- writingQuestionsWidget fbD p s
-    _ <- transactionUpdate R1 $ ffor (attachPromptlyDyn fbD writingQuestionE) $ \(fbs, wqe) ->
+    void $ transactionUpdate R1 $ ffor (attachPromptlyDyn fbD writingQuestionE) $ \(fbs, wqe) ->
       case wqe of
         StartGame ->
           ( i,
@@ -203,58 +205,94 @@ widgetPicker fbD i p gs = case gs of
                 & fireBaseStateState
                 %~ handleWritingQuestionsEvent p wqe
           )
-        SaveWords wl ->
+        SavePhrases _ ->
           ( i,
-            HandleStale $ \(fbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
+            HandleStale $ \(fbs'@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
               WritingQuestions _ ->
                 Just $
-                  fbs
+                  fbs'
                     & fireBaseStateState
-                    . _WritingQuestions
-                    . writingQuestionStatePlayersWords
-                    . at p
-                    .~ NE.nonEmpty (filter (not . T.null) wl)
+                    %~ handleWritingQuestionsEvent p wqe
               _ -> Nothing
           )
-    pure ()
   BetweenRound s -> do
-    inRoundE <- traceEventWith show <$> betweenRoundWidget s
-    _ <- transactionUpdate R1 $ ffor (attachPromptlyDyn fbD inRoundE) $ \(fbs, irc) ->
+    betweenRoundE <- betweenRoundWidget s
+    void $ transactionUpdate R1 $ ffor (attachPromptlyDyn fbD betweenRoundE) $ \(fbs, bre) ->
       ( i,
         OnlyCurrent $
           fbs
             & fireBaseStateState
-            .~ ( InRound
-                   ( InRoundState
-                       { _inRoundStateCurrentPlayer = p,
-                         _inRoundStateCelebrityState = s ^. betweenRoundStateCelebrityState
-                       }
-                   )
-               )
+            %~ handleBetweenRoundEvent p bre
       )
-    pure ()
   InRound s -> do
-    inRoundWidget p s
-    pure ()
+    inRoundE <- inRoundWidget p s
+    void $ transactionUpdate R1 $ ffor (attachPromptlyDyn fbD inRoundE) $ \(fbs, ire) ->
+      ( i,
+        OnlyCurrent $
+          fbs
+            & fireBaseStateState
+            %~ handleInRoundEvent ire
+      )
+  GameOver s -> do
+    elAttr "div" ("class" =: "tile is-ancestor") $ do
+      elAttr "div" ("class" =: "tile notification is-danger") $ do
+        elAttr "p" ("class" =: "title is-5") $ text "Team 1"
+        elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. gameOverStateCelebrityState . celebrityStateTeam1Score
+      elAttr "div" ("class" =: "tile notification is-primary") $ do
+        elAttr "p" ("class" =: "title is-4") $ do
+          let winngingTeam =
+                if s ^. gameOverStateCelebrityState . celebrityStateTeam1Score > s ^. gameOverStateCelebrityState . celebrityStateTeam2Score
+                  then "1"
+                  else "2"
+          text $ "Team " <> winngingTeam <> " Wins!"
+      elAttr "div" ("class" =: "tile notification is-danger") $ do
+        elAttr "p" ("class" =: "title is-5") $ text "Team 2"
+        elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. gameOverStateCelebrityState . celebrityStateTeam2Score
 
 betweenRoundWidget ::
-  (DomBuilder t m) =>
+  ( DomBuilder t m,
+    MonadHold t m,
+    PostBuild t m,
+    MonadFix m
+  ) =>
   BetweenRoundState ->
-  m (Event t ())
-betweenRoundWidget s = do
-  elAttr "div" ("class" =: "tile is-ancestor") $ do
-    elAttr "div" ("class" =: "tile notification is-danger") $ do
-      elAttr "p" ("class" =: "title is-5") $ text "Team 1"
-      elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam1Score
-    myTurnE <- elAttr "div" ("class" =: "tile notification is-primary") $ do
-      elAttr "p" ("class" =: "title is-4") $ text $ "Round " <> T.pack (show (s ^. betweenRoundStateCelebrityState . celebrityStateRoundNum))
-      elAttr "p" ("class" =: "subtitle is-5") $ text $ (T.pack $ show $ length $ s ^. betweenRoundStateCelebrityState . celebrityStateFreeWords) <> " words left"
-      elAttr "p" ("class" =: "title is-5") $ text $ "Team " <> T.pack (show $ s ^. betweenRoundStateCelebrityState . celebrityStateCurrentTeam) <> " is up!"
-      domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-dark") $ text "My turn!"
-    elAttr "div" ("class" =: "tile notification is-danger") $ do
-      elAttr "p" ("class" =: "title is-5") $ text "Team 2"
-      elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam2Score
-    pure myTurnE
+  m (Event t BetweenRoundEvent)
+betweenRoundWidget s = mdo
+  showLoadingD <- toggle False myTurnE
+  myTurnEE <- dyn $ ffor showLoadingD $ \case
+    True -> never <$ loading
+    False -> elAttr "div" ("class" =: "tile is-ancestor") $ do
+      elAttr "div" ("class" =: "tile notification is-danger") $ do
+        elAttr "p" ("class" =: "title is-5") $ text "Team 1"
+        elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam1Score
+      myTurnClickE <- elAttr "div" ("class" =: "tile notification is-primary") $ do
+        elAttr "p" ("class" =: "title is-4") $ text $ "Round " <> T.pack (show (s ^. betweenRoundStateCelebrityState . celebrityStateRoundNum))
+        elAttr "p" ("class" =: "subtitle is-5") $ text $ (T.pack $ show $ length $ s ^. betweenRoundStateCelebrityState . celebrityStateFreePhrases) <> " phrase(s) left"
+        elAttr "p" ("class" =: "title is-4") $ text $ "Team " <> T.pack (show $ s ^. betweenRoundStateCelebrityState . celebrityStateCurrentTeam) <> " is up!"
+        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-dark") $ text "My turn!"
+      elAttr "div" ("class" =: "tile notification is-danger") $ do
+        elAttr "p" ("class" =: "title is-5") $ text "Team 2"
+        elAttr "p" ("class" =: "subtitle is-5") $ text $ T.pack $ show $ s ^. betweenRoundStateCelebrityState . celebrityStateTeam2Score
+      pure $ MyTurn <$ myTurnClickE
+  myTurnE <- switchHold never myTurnEE
+  pure myTurnE
+
+countdownTimer ::
+  ( PerformEvent t m,
+    TriggerEvent t m,
+    MonadIO (Performable m),
+    MonadFix m,
+    MonadHold t m,
+    PostBuild t m
+  ) =>
+  Int ->
+  m (Dynamic t Int, Event t ())
+countdownTimer t = do
+  tE <- tickLossyFromPostBuildTime 1
+  tD <- foldDyn (const pred) t tE
+  pure (tD, attachPromptlyDynWithMaybe (\left _ -> if left < 2 then Just () else Nothing) tD tE)
+
+data PhraseListZipper a = PhraseListZipper [a] a [a]
 
 inRoundWidget ::
   ( DomBuilder t m,
@@ -269,19 +307,36 @@ inRoundWidget ::
   ) =>
   Player ->
   InRoundState ->
-  m (Event t [Text])
+  m (Event t InRoundEvent)
 inRoundWidget me s =
   if me == (s ^. inRoundStateCurrentPlayer)
     then do
-      tE <- tickLossyFromPostBuildTime 1
-      tD <- foldDyn (const pred) 2 tE
-      let hitZeroE = attachPromptlyDynWithMaybe (\left _ -> if left < 1 then Just () else Nothing) tD tE
-      isZeroD <- foldDyn (const . const True) False hitZeroE
-      el "pre" $ display tD
-      el "pre" $ display isZeroD
-      elAttr "div" ("class" =: "title is-3") $ text "Word 1"
-      elAttr "button" ("class" =: "button is-dark") $ text "Next"
-      pure never
+      pbE <- getPostBuild
+      randE <- performEvent $ liftIO (shuffle (Set.toList $ s ^. inRoundStateCelebrityState . celebrityStateFreePhrases)) <$ pbE
+      roundOverD <- widgetHold (never <$ loading) $ ffor randE $ \shuffled -> mdo
+        let mkZipper _ (guessedPhrases, Nothing) = (guessedPhrases, Nothing)
+            mkZipper _ (guessedPhrases, Just (w NE.:| ws)) = (w : guessedPhrases, NE.nonEmpty ws)
+        phrasesD <- foldDyn mkZipper ([], NE.nonEmpty shuffled) nextClickE
+        let phrasesLeftD = maybe 0 NE.length . snd <$> phrasesD
+        (timeleftD, hitZeroE) <- countdownTimer 60
+        nextClickEE <- dyn $ ffor phrasesLeftD $ \phrasesLeft ->
+          if phrasesLeft == 0
+            then never <$ loading
+            else do
+              elAttr "div" ("class" =: "title is-3") $ display timeleftD
+              elAttr "div" ("class" =: "subtitle is-6") $ dynText $ ffor phrasesLeftD $ \phrasesLeft -> T.pack (show phrasesLeft) <> " phrase(s) left"
+              elAttr "div" ("class" =: "title is-3") $ dynText $ maybe "" NE.head . snd <$> phrasesD
+              domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-dark") $ text "Got it!"
+        nextClickE <- switchHold never nextClickEE
+        let outOfPhrasesE = fforMaybe (updated phrasesD) $
+              \(guessedPhrases, mwds) -> maybe (Just guessedPhrases) (const Nothing) mwds
+            hitZeroPhrasesE =
+              attachPromptlyDynWith
+                (\(guessedPhrases, _) _ -> guessedPhrases)
+                phrasesD
+                hitZeroE
+        pure $ leftmost $ map (fmap CorrectGuesses) [outOfPhrasesE, hitZeroPhrasesE]
+      pure $ switchDyn roundOverD
     else do
       elAttr "div" ("class" =: "title is-2") $ text "Pay attention!"
       pure never
@@ -297,52 +352,84 @@ writingQuestionsWidget ::
   Player ->
   WritingQuestionState ->
   m (Event t WritingQuestionsEvent)
-writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersWords}) = mdo
-  let totalWordsSubmittedD =
-        ffor fbD $
-          getSum
-            . foldMapOf
-              ( fireBaseStateState
-                  . _WritingQuestions
-                  . writingQuestionStatePlayersWords
-              )
-              (foldMap (Sum . NE.length))
-      initWords = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersWords
-  showWordListD <- toggle (null initWords) toggleShowWordListE
-  toggleShowWordListEE <- dyn $ ffor showWordListD $ \case
-    False -> do
-      elAttr "div" ("class" =: "content") $ do
-        elAttr "h2" ("class" =: "is-large") $ dynText $ ffor totalWordsSubmittedD $ \t -> (T.pack $ show t) <> " word(s) submitted so far."
-      editWordListClickE <-
-        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-success") $
-          text "Edit Words"
-      startGameClickE <-
-        domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $
-          text "Start Game"
-      pure $ align (Nothing <$ editWordListClickE) startGameClickE
-    True -> do
-      currentWords <- sample $ current wordD
-      elAttr "p" ("class" =: "title") $ text "Add some words then click save"
-      wordListD <- el "div" $ wordList currentWords
-      el "br" blank
-      saveClickE <-
-        tagPromptlyDyn wordListD . domEvent Click . fst
-          <$$> elAttr' "button" ("class" =: "button is-success")
-          $ text "Save"
-      pure $ (This . Just <$> saveClickE)
-  toggleShowWordListE <- switchHold never toggleShowWordListEE
-  let wordListE = fmapMaybe (these id (const Nothing) (\a _ -> a)) toggleShowWordListE
-  wordD <- holdDyn initWords wordListE
+writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersPhrases}) = mdo
+  let totalPhrasesSubmittedD =
+        ffor2 fbD phraseD $ \fb wds ->
+          let phrasesInLocalState = length wds
+              phrasesNotInStateYet =
+                maybe phrasesInLocalState (\myPhrases -> phrasesInLocalState - NE.length myPhrases) $ join $
+                  fb
+                    ^? fireBaseStateState
+                      . _WritingQuestions
+                      . writingQuestionStatePlayersPhrases
+                      . at player
+              totalPhrases =
+                getSum $
+                  foldMapOf
+                    ( fireBaseStateState
+                        . _WritingQuestions
+                        . writingQuestionStatePlayersPhrases
+                    )
+                    (foldMap (Sum . NE.length))
+                    fb
+           in totalPhrases + phrasesNotInStateYet
+      initPhrases = maybe [] NE.toList $ Map.lookup player _writingQuestionStatePlayersPhrases
+  showPhraseListD <-
+    toggle (null initPhrases) $
+      fmapMaybe
+        ( these
+            (const $ Just ())
+            (const Nothing)
+            (\_ -> const Nothing)
+        )
+        startOrEditE
+  showLoadingD <-
+    toggle False $
+      fmapMaybe
+        ( these
+            (const Nothing)
+            (const (Just ()))
+            (\_ -> const (Just ()))
+        )
+        startOrEditE
+  startOrEditEE <- dyn $ ffor2 showPhraseListD showLoadingD $ \showPhraseList showLoading ->
+    if showLoading
+      then never <$ loading
+      else
+        if showPhraseList
+          then do
+            currentPhrases <- sample $ current phraseD
+            elAttr "p" ("class" =: "title") $ text "Add some phrases then click save"
+            phraseListD <- el "div" $ phraseList currentPhrases
+            el "br" blank
+            saveClickE <-
+              tagPromptlyDyn phraseListD . domEvent Click . fst
+                <$$> elAttr' "button" ("class" =: "button is-success")
+                $ text "Save"
+            pure $ (This . Just <$> saveClickE)
+          else do
+            elAttr "div" ("class" =: "content") $ do
+              elAttr "h2" ("class" =: "is-large") $ dynText $ ffor totalPhrasesSubmittedD $ \t -> (T.pack $ show t) <> " phrase(s) submitted so far."
+            editPhraseListClickE <-
+              domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-success") $
+                text "Edit Phrases"
+            el "hr" blank
+            startGameClickE <-
+              domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $
+                text "Start Game"
+            pure $ align (Nothing <$ editPhraseListClickE) startGameClickE
+  startOrEditE <- switchHold never startOrEditEE
+  phraseD <- holdDyn initPhrases $ fmapMaybe (these id (const Nothing) (\a _ -> a)) startOrEditE
   pure $
     fmapMaybe
       ( these
-          (fmap SaveWords)
+          (fmap SavePhrases)
           (const (Just StartGame))
-          (\a -> const (Just StartGame))
+          (\_ -> const (Just StartGame))
       )
-      toggleShowWordListE
+      startOrEditE
 
-wordList ::
+phraseList ::
   forall m t.
   ( MonadFix m,
     DomBuilder t m,
@@ -351,22 +438,22 @@ wordList ::
   ) =>
   [Text] ->
   m (Dynamic t [Text])
-wordList initWords = mdo
-  let initWordsMap =
+phraseList initPhrases = mdo
+  let initPhrasesMap =
         Map.fromList $ zip [0 ..] $
-          if null initWords then [""] else initWords
-      wordListDeletE = switchDyn $ leftmost . Map.elems . fmap snd <$> wordListInputs
-      wordListAddE = domEvent Click addWordButton
-      onWordListMod (Left _) xs =
+          if null initPhrases then [""] else initPhrases
+      phraseListDeletE = switchDyn $ leftmost . Map.elems . fmap snd <$> phraseListInputs
+      phraseListAddE = domEvent Click addPhraseButton
+      onPhraseListMod (Left _) xs =
         let x = maybe (-1 :: Int) fst (Map.lookupMax xs)
          in Map.insert (succ x) "" xs
-      onWordListMod (Right i) xs = Map.delete i xs
-  wordListD <-
-    foldDyn onWordListMod initWordsMap $
-      leftmost [Left <$> wordListAddE, Right <$> wordListDeletE]
-  wordListInputs <- elAttr "div" ("class" =: "content is-large")
+      onPhraseListMod (Right i) xs = Map.delete i xs
+  phraseListD <-
+    foldDyn onPhraseListMod initPhrasesMap $
+      leftmost [Left <$> phraseListAddE, Right <$> phraseListDeletE]
+  phraseListInputs <- elAttr "div" ("class" =: "content is-large")
     $ el "ol"
-    $ listWithKey wordListD
+    $ listWithKey phraseListD
     $ \i v ->
       el "li" $ elAttr "div" ("class" =: "field has-addons") $ do
         initialVal <- sample $ current v
@@ -382,7 +469,7 @@ wordList initWords = mdo
           elAttr "div" ("class" =: "control") $
             (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $ text "X"))
         pure (inputE, removeClickE)
-  (addWordButton, _) <-
+  (addPhraseButton, _) <-
     elAttr' "button" ("class" =: "button") $
-      text "Add another word"
-  pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> wordListInputs
+      text "Add another phrase"
+  pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> phraseListInputs
