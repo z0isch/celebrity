@@ -38,7 +38,8 @@ executable frontend
                      , transformers
                      , random
                      , array
-                     --, ghcjs-base
+                     , ghcjs-base
+                     , ghcjs-dom-jsffi
   ghc-options: -threaded -Wall
   -- hs-source-dirs:
   default-language:    Haskell2010

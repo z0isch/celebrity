@@ -1,10 +1,16 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Celebrity.Types where
 
@@ -276,9 +282,9 @@ handleInRoundEvent ire gs = case ire of
           then BetweenRound $ BetweenRoundState {_betweenRoundStateCelebrityState = newCelebState}
           else GameOver $ GameOverState {_gameOverStateCelebrityState = newCelebState}
 
-shuffle :: [a] -> IO [a]
+shuffle :: forall a. [a] -> IO [a]
 shuffle xs = do
-  ar <- newArray n xs
+  ar <- newListArray @IOArray (1, n) xs
   forM [1 .. n] $ \i -> do
     j <- randomRIO (i, n)
     vi <- readArray ar i
@@ -287,5 +293,3 @@ shuffle xs = do
     return vj
   where
     n = length xs
-    newArray :: Int -> [a] -> IO (IOArray Int a)
-    newArray n xs = newListArray (1, n) xs

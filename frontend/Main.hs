@@ -10,11 +10,12 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
 import Celebrity.Types
-import Control.Lens ((%~), (^.), (^?), at, foldMapOf)
+import Control.Lens ((%~), (^.), (^?), _1, _2, at, foldMapOf, view)
 import Control.Monad (join, void)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad.IO.Class (MonadIO)
@@ -29,8 +30,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
 import Data.These (These (..), these)
+import GHCJS.DOM.HTMLElement (focus)
 import JSDOM (currentWindowUnchecked)
 import JSDOM.Custom.Window (getLocalStorage)
+--import JSDOM.HTMLElement (focus)
 import JSDOM.Storage (getItem, setItem)
 import Language.Javascript.JSaddle (MonadJSM, liftJSM)
 import Reflex.Dom
@@ -165,7 +168,8 @@ inGameWidget ::
     PostBuild t m,
     MonadFirebase m,
     MonadFirebase (Performable m),
-    MonadFix m
+    MonadFix m,
+    GhcjsDomSpace ~ DomBuilderSpace m
   ) =>
   Id ->
   Player ->
@@ -186,7 +190,8 @@ widgetPicker ::
     PerformEvent t m,
     TriggerEvent t m,
     MonadFirebase (Performable m),
-    MonadFirebase m
+    MonadFirebase m,
+    GhcjsDomSpace ~ DomBuilderSpace m
   ) =>
   Dynamic t FireBaseState ->
   Id ->
@@ -324,7 +329,7 @@ inRoundWidget me s =
             then never <$ loading
             else do
               elAttr "div" ("class" =: "title is-3") $ display timeleftD
-              elAttr "div" ("class" =: "subtitle is-6") $ dynText $ ffor phrasesLeftD $ \phrasesLeft -> T.pack (show phrasesLeft) <> " phrase(s) left"
+              elAttr "div" ("class" =: "subtitle is-6") $ text $ T.pack (show phrasesLeft) <> " phrase(s) left"
               elAttr "div" ("class" =: "title is-3") $ dynText $ maybe "" NE.head . snd <$> phrasesD
               domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-dark") $ text "Got it!"
         nextClickE <- switchHold never nextClickEE
@@ -346,7 +351,11 @@ writingQuestionsWidget ::
   ( MonadFix m,
     DomBuilder t m,
     MonadHold t m,
-    PostBuild t m
+    PostBuild t m,
+    PerformEvent t m,
+    MonadJSM (Performable m),
+    GhcjsDomSpace ~ DomBuilderSpace m,
+    TriggerEvent t m
   ) =>
   Dynamic t FireBaseState ->
   Player ->
@@ -431,10 +440,14 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
 
 phraseList ::
   forall m t.
-  ( MonadFix m,
-    DomBuilder t m,
+  ( DomBuilder t m,
+    MonadFix m,
     MonadHold t m,
-    PostBuild t m
+    PostBuild t m,
+    PerformEvent t m,
+    MonadJSM (Performable m),
+    GhcjsDomSpace ~ DomBuilderSpace m,
+    TriggerEvent t m
   ) =>
   [Text] ->
   m (Dynamic t [Text])
@@ -442,34 +455,42 @@ phraseList initPhrases = mdo
   let initPhrasesMap =
         Map.fromList $ zip [0 ..] $
           if null initPhrases then [""] else initPhrases
-      phraseListDeletE = switchDyn $ leftmost . Map.elems . fmap snd <$> phraseListInputs
+      phraseListDeletE = switchDyn $ leftmost . Map.elems . fmap (view _2) <$> phraseListInputsD
       phraseListAddE = domEvent Click addPhraseButton
       onPhraseListMod (Left _) xs =
         let x = maybe (-1 :: Int) fst (Map.lookupMax xs)
          in Map.insert (succ x) "" xs
       onPhraseListMod (Right i) xs = Map.delete i xs
+
   phraseListD <-
     foldDyn onPhraseListMod initPhrasesMap $
       leftmost [Left <$> phraseListAddE, Right <$> phraseListDeletE]
-  phraseListInputs <- elAttr "div" ("class" =: "content is-large")
+  phraseListInputsD <- elAttr "div" ("class" =: "content is-large")
     $ el "ol"
     $ listWithKey phraseListD
     $ \i v ->
       el "li" $ elAttr "div" ("class" =: "field has-addons") $ do
         initialVal <- sample $ current v
-        inputE <-
+        inputEl <-
           elAttr "div" ("class" =: "control is-expanded") $
-            _inputElement_value
-              <$> inputElement
-                ( def
-                    & inputElementConfig_initialValue .~ initialVal
-                    & inputElementConfig_elementConfig . elementConfig_initialAttributes .~ ("class" =: "input")
-                )
+            inputElement
+              ( def
+                  & inputElementConfig_initialValue .~ initialVal
+                  & inputElementConfig_elementConfig . elementConfig_initialAttributes .~ ("class" =: "input")
+              )
         removeClickE <-
           elAttr "div" ("class" =: "control") $
             (i <$$ (domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $ text "X"))
-        pure (inputE, removeClickE)
+        pure (inputEl, removeClickE)
   (addPhraseButton, _) <-
     elAttr' "button" ("class" =: "button") $
       text "Add another phrase"
-  pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap fst <$> phraseListInputs
+
+  -- UGG, delay to let dom catch up...
+  phraseListOnAddE <- delay 0.1 $ fmapMaybe Map.lookupMax (updated phraseListInputsD)
+
+  performEvent_
+    $ ffor phraseListOnAddE
+    $ \(_, (inputEl, _)) -> liftJSM $ focus $ _inputElement_raw inputEl
+
+  pure $ join $ mconcat . fmap (fmap pure) . Map.elems . fmap (_inputElement_value . view _1) <$> phraseListInputsD
