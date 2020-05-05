@@ -487,7 +487,7 @@ phraseList initPhrases = mdo
       text "Add another phrase"
 
   -- UGG, delay to let dom catch up...
-  phraseListOnAddE <- delay 0.1 $ fmapMaybe Map.lookupMax (updated phraseListInputsD)
+  phraseListOnAddE <- attachPromptlyDynWithMaybe (\a _ -> Map.lookupMax a) phraseListInputsD <$> delay 0.1 phraseListAddE
 
   performEvent_
     $ ffor phraseListOnAddE
