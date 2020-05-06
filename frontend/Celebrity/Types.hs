@@ -23,7 +23,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -67,7 +67,8 @@ data CelebrityState = CelebrityState
     _celebrityStateCurrentTeam :: Int,
     _celebrityStateRoundNum :: Int,
     _celebrityStateFreePhrases :: Set Text,
-    _celebrityStateUsedPhrases :: Set Text
+    _celebrityStateUsedPhrases :: Set Text,
+    _celebrityStateSecondsPerRound :: Int
   }
   deriving (Show, Eq, Generic)
 
@@ -119,7 +120,8 @@ instance FromJSVal InRoundState where
   fromJSVal = fromJSValAesonText
 
 data WritingQuestionState = WritingQuestionState
-  { _writingQuestionStatePlayersPhrases :: Map Player (NonEmpty Text)
+  { _writingQuestionStatePlayersPhrases :: Map Player (NonEmpty Text),
+    _writingQuestionStateSecondsPerRound :: Int
   }
   deriving (Show, Eq, Generic)
 
@@ -180,7 +182,12 @@ initialState = do
   _fireBaseStateRevision <- Revision <$> randText
   pure $
     FireBaseState
-      { _fireBaseStateState = WritingQuestions WritingQuestionState {_writingQuestionStatePlayersPhrases = mempty},
+      { _fireBaseStateState =
+          WritingQuestions
+            WritingQuestionState
+              { _writingQuestionStatePlayersPhrases = mempty,
+                _writingQuestionStateSecondsPerRound = 60
+              },
         _fireBaseStateRevision
       }
 
@@ -210,6 +217,7 @@ instance Route R (Id, FireBaseState) where
 
 data WritingQuestionsEvent
   = SavePhrases [Text]
+  | SetSecondsPerRound Int
   | StartGame
 
 handleWritingQuestionsEvent ::
@@ -224,6 +232,11 @@ handleWritingQuestionsEvent p wqe gs = case wqe of
       . writingQuestionStatePlayersPhrases
       . at p
       .~ NE.nonEmpty (filter (not . T.null) wl)
+  SetSecondsPerRound s ->
+    gs
+      & _WritingQuestions
+      . writingQuestionStateSecondsPerRound
+      .~ s
   StartGame ->
     BetweenRound $
       BetweenRoundState
@@ -236,7 +249,8 @@ handleWritingQuestionsEvent p wqe gs = case wqe of
                 _celebrityStateFreePhrases =
                   foldMap (Set.fromList . NE.toList) $
                     gs ^. _WritingQuestions . writingQuestionStatePlayersPhrases,
-                _celebrityStateUsedPhrases = mempty
+                _celebrityStateUsedPhrases = mempty,
+                _celebrityStateSecondsPerRound = fromMaybe 60 $ gs ^? _WritingQuestions . writingQuestionStateSecondsPerRound
               }
         }
 

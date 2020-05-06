@@ -20,7 +20,7 @@ import Control.Monad (join, void)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.IO.Class
-import Data.Align (align)
+import Data.Foldable (for_)
 import Data.Function (on)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
@@ -29,7 +29,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
-import Data.These (These (..), these)
 import GHCJS.DOM.HTMLElement (focus)
 import JSDOM (currentWindowUnchecked)
 import JSDOM.Custom.Window (getLocalStorage)
@@ -210,12 +209,12 @@ widgetPicker fbD i p gs = case gs of
                 & fireBaseStateState
                 %~ handleWritingQuestionsEvent p wqe
           )
-        SavePhrases _ ->
+        _ ->
           ( i,
-            HandleStale $ \(fbs'@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
+            HandleStale $ \(newFbs@FireBaseState {_fireBaseStateState}) -> case _fireBaseStateState of
               WritingQuestions _ ->
                 Just $
-                  fbs'
+                  newFbs
                     & fireBaseStateState
                     %~ handleWritingQuestionsEvent p wqe
               _ -> Nothing
@@ -323,7 +322,7 @@ inRoundWidget me s =
             mkZipper _ (guessedPhrases, Just (w NE.:| ws)) = (w : guessedPhrases, NE.nonEmpty ws)
         phrasesD <- foldDyn mkZipper ([], NE.nonEmpty shuffled) nextClickE
         let phrasesLeftD = maybe 0 NE.length . snd <$> phrasesD
-        (timeleftD, hitZeroE) <- countdownTimer 60
+        (timeleftD, hitZeroE) <- countdownTimer $ s ^. inRoundStateCelebrityState . celebrityStateSecondsPerRound
         nextClickEE <- dyn $ ffor phrasesLeftD $ \phrasesLeft ->
           if phrasesLeft == 0
             then never <$ loading
@@ -361,7 +360,7 @@ writingQuestionsWidget ::
   Player ->
   WritingQuestionState ->
   m (Event t WritingQuestionsEvent)
-writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersPhrases}) = mdo
+writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePlayersPhrases, _writingQuestionStateSecondsPerRound}) = mdo
   let totalPhrasesSubmittedD =
         ffor2 fbD phraseD $ \fb wds ->
           let phrasesInLocalState = length wds
@@ -386,19 +385,18 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
   showPhraseListD <-
     toggle (null initPhrases) $
       fmapMaybe
-        ( these
-            (const $ Just ())
-            (const Nothing)
-            (\_ -> const Nothing)
+        ( \case
+            Just (SavePhrases _) -> Just ()
+            Nothing -> Just ()
+            _ -> Nothing
         )
         startOrEditE
   showLoadingD <-
     toggle False $
       fmapMaybe
-        ( these
-            (const Nothing)
-            (const (Just ()))
-            (\_ -> const (Just ()))
+        ( \case
+            Just StartGame -> Just ()
+            _ -> Nothing
         )
         startOrEditE
   startOrEditEE <- dyn $ ffor2 showPhraseListD showLoadingD $ \showPhraseList showLoading ->
@@ -415,7 +413,7 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
               tagPromptlyDyn phraseListD . domEvent Click . fst
                 <$$> elAttr' "button" ("class" =: "button is-success")
                 $ text "Save"
-            pure $ (This . Just <$> saveClickE)
+            pure $ Just . SavePhrases <$> saveClickE
           else do
             elAttr "div" ("class" =: "content") $ do
               elAttr "h2" ("class" =: "is-large") $ dynText $ ffor totalPhrasesSubmittedD $ \t -> (T.pack $ show t) <> " phrase(s) submitted so far."
@@ -423,20 +421,37 @@ writingQuestionsWidget fbD player (WritingQuestionState {_writingQuestionStatePl
               domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-success") $
                 text "Edit Phrases"
             el "hr" blank
+            secondsPerRoundD <- el "div" $ do
+              elAttr "p" ("class" =: "title is-5") $ text $ "Seconds per turn"
+              elAttr "div" ("class" =: "select") $ do
+                fmap (read . T.unpack) . _selectElement_value . fst
+                  <$$> selectElement
+                    ( def
+                        & selectElementConfig_initialValue .~ (T.pack $ show _writingQuestionStateSecondsPerRound)
+                    )
+                  $ for_ (take 12 [60, 55 ..])
+                  $ \(i :: Int) ->
+                    elAttr "option" ("value" =: (T.pack $ show i)) $ text $ T.pack $ show i
+            el "hr" blank
             startGameClickE <-
               domEvent Click . fst <$$> elAttr' "button" ("class" =: "button is-danger") $
                 text "Start Game"
-            pure $ align (Nothing <$ editPhraseListClickE) startGameClickE
+            pure $
+              leftmost
+                [ Nothing <$ editPhraseListClickE,
+                  Just StartGame <$ startGameClickE,
+                  Just . SetSecondsPerRound <$> updated secondsPerRoundD
+                ]
   startOrEditE <- switchHold never startOrEditEE
-  phraseD <- holdDyn initPhrases $ fmapMaybe (these id (const Nothing) (\a _ -> a)) startOrEditE
-  pure $
-    fmapMaybe
-      ( these
-          (fmap SavePhrases)
-          (const (Just StartGame))
-          (\_ -> const (Just StartGame))
-      )
-      startOrEditE
+  phraseD <-
+    holdDyn initPhrases $
+      fmapMaybe
+        ( \case
+            Just (SavePhrases ps) -> Just ps
+            _ -> Nothing
+        )
+        startOrEditE
+  pure $ fmapMaybe id startOrEditE
 
 phraseList ::
   forall m t.
